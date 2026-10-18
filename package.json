@@ -1,0 +1,8 @@
+{
+  "name": "hidden-appetite",
+  "version": "1.0.0",
+  "description": "Real-time multiplayer trading game",
+  "main": "server.js",
+  "scripts": { "start": "node server.js" },
+  "engines": { "node": ">=18" }
+}
