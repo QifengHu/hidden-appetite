@@ -15,12 +15,12 @@ Open `http://localhost:3000` to host. To let phones on the same Wi-Fi join, open
 ## How to play
 
 1. Host a room and share the six-character code or invite QR.
-2. Choose an offer style and start a round. Each round lasts 60 seconds.
-3. Players are paired randomly. One sells, one buys; each player swaps role in the next round.
-4. Buyers privately see one of three appetite cards. Sellers choose one quantity or set a minimum; buyers accept, veto, or pick a quantity from the menu.
-5. After the round, the table sees the appetite card, each player’s points, and potential points left on the table.
+2. Choose an offer style and optionally run the practice round. A normal trade gives sellers up to 30 seconds to offer and buyers up to 20 seconds to respond; it ends as soon as every pair finishes.
+3. Players are paired randomly. Roles swap between rounds. Players who disconnect are marked away and skipped until they reconnect.
+4. Buyers privately see one of three appetite cards. Sellers see the possible card types, then choose one quantity or set a minimum; buyers accept, veto, or pick a quantity from the menu.
+5. After each round, the table sees the appetite card, both scores, and points left on the table. Practice points do not affect scores or the Lab Report.
 
-Preset table talk can be switched off. With an odd number of players, the host can sit one player out or pair one player with Miso, the simple house bot. Rejoining with the same browser session restores the player identity.
+Preset table talk can be switched off. Chat phrases are private to the paired players. With an odd number of players, the host can sit one player out or pair one player with Miso, the simple house bot. Rejoining with the same browser session restores the player identity. New players are blocked after the game starts unless the host enables late joining; those players join the next round.
 
 ## Notes
 
