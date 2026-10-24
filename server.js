@@ -157,6 +157,11 @@ function pub(room, pid) {
   const visibleHistory = room.history.filter(h => h.round !== room.round || room.phase === 'reveal' || room.phase === 'ended');
   const realHistory = room.history.filter(h => !h.practice);
   const efficiency = realHistory.reduce((sum, h) => ({ actual: sum.actual + h.actualValue, best: sum.best + h.bestValue }), { actual: 0, best: 0 });
+  const sellerCurves = role === 'Seller' && !room.practice ? cards.map(card => {
+    const maximum = Math.max(...card.values);
+    return { name: card.name.replace(' appetite', ''), shape: card.values.map(value => Number((value / maximum).toFixed(3))) };
+  }) : null;
+  const practiceCards = role === 'Seller' && room.practice ? cards.map(card => ({ name: card.name, values: card.values, color: card.color })) : null;
   return {
     code: room.code, hostId: room.hostId,
     players: room.players.map(p => ({ id: p.id, name: p.name, score: room.phase === 'ended' ? p.score : p.id === pid ? p.score : null, connected: p.connected, role: room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
@@ -164,12 +169,12 @@ function pub(room, pid) {
     started: room.started, phase: room.phase, step: room.step,
     remainingMs: room.phase === 'trade' ? Math.max(0, room.deadline - Date.now()) : 0,
     yourRole: role, yourCard: role === 'Buyer' ? { name: mine.card.name, values: mine.card.values, color: mine.card.color } : null,
+    sellerCurves, practiceCards,
     yourPair: mine ? mine.a : null, history: visibleHistory, efficiency,
     offer: mine ? room.offers[mine.a] || null : null,
     messages: mine ? room.messages[mine.a] || [] : [], yourId: pid
   };
-}
-function json(res, status, data) {
+}function json(res, status, data) {
   res.writeHead(status, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
   res.end(JSON.stringify(data));
 }
