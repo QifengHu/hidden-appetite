@@ -6,10 +6,13 @@ const crypto = require('crypto');
 const PORT = Number(process.env.PORT || 3000);
 const rooms = new Map();
 const cards = [
-  { name: 'Nibble', values: [0, 6, 8, 6, 2, -4, -12], color: 'mint' },
-  { name: 'Balanced', values: [0, 3, 7, 10, 10, 6, 0], color: 'blue' },
-  { name: 'Feast', values: [0, 1, 3, 6, 10, 15, 18], color: 'coral' }
+  { name: 'Small appetite', values: [0, 24, 44, 51, 56, 40, 36], color: 'mint' },
+  { name: 'Medium appetite', values: [0, 8, 28, 57, 80, 80, 54], color: 'blue' },
+  { name: 'Large appetite', values: [0, 8, 18, 36, 56, 90, 120], color: 'coral' }
 ];
+const PRICE = 10;
+// Buyer-best-response check: Single q=4 gives seller 40.0, buyer 24.0 and 75% value captured;
+// Menu min=4 yields q=[4,4,6], seller 46.7, buyer 38.7 and 100%; Single q=6 seller avg is 20.0.
 const phrases = ['Sounds good 👍', 'Hmm… tempting 🤔', 'That’s too much 😅', 'Let’s make a deal 🤝', 'I’m hungry! 😋', 'No deal 🙅'];
 const id = () => crypto.randomBytes(8).toString('hex');
 const code = () => crypto.randomBytes(3).toString('hex').toUpperCase();
@@ -24,71 +27,101 @@ const shuffle = list => {
 function freshRoom(hostId, hostName) {
   return {
     code: code(), hostId,
-    players: [{ id: hostId, name: hostName, score: 0, connected: true, lastSeen: Date.now(), lastRole: null }],
-    settings: { mode: 'single', chat: true, odd: 'sit', lateJoin: false },
-    round: 0, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0,
+    players: [{ id: hostId, name: hostName, score: 0, connected: true, lastSeen: Date.now(), lastRole: null, rotation: { buyer: 0, seller: 0, sitOut: 0 } }],
+    settings: { mode: 'menu', chat: true, odd: 'sit', lateJoin: false },
+    round: 0, roundSitter: null, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0, botLastRole: null,
     pairs: [], history: [], offers: {}, messages: {}, endAt: 0
   };
 }
 function pairDone(room, pair) { return room.history.some(h => h.round === room.round && h.a === pair.a); }
 function settle(room, pair, quantity, { veto = false, reason = null } = {}) {
   if (!pair || pairDone(room, pair)) return;
-  const q = veto ? 0 : quantity;
+  const q = veto ? 0 : Math.max(0, Math.min(6, quantity));
   const buyerId = pair.roleA === 'Buyer' ? pair.a : pair.b;
   const sellerId = buyerId === pair.a ? pair.b : pair.a;
   const buyer = room.players.find(p => p.id === buyerId);
   const seller = room.players.find(p => p.id === sellerId);
-  const buyerPoints = pair.card.values[q], sellerPoints = q * 5;
+  const noDeal = veto || q === 0;
+  const buyerCoins = noDeal ? 0 : pair.card.values[q] - PRICE * q;
+  const sellerCoins = noDeal ? 0 : PRICE * q;
+  const offer = room.offers[pair.a];
+  let bestBuyerCoins = -Infinity;
+  if (offer) {
+    const start = offer.mode === 'menu' ? offer.quantity : offer.quantity;
+    const end = offer.mode === 'menu' ? 6 : offer.quantity;
+    for (let n = start; n <= end; n++) bestBuyerCoins = Math.max(bestBuyerCoins, pair.card.values[n] - PRICE * n);
+  }
+  const bestValue = Math.max(...pair.card.values);
+  const actualValue = noDeal ? 0 : pair.card.values[q];
+  const spiteVeto = veto && bestBuyerCoins > 0;
   if (!room.practice) {
-    if (buyer) buyer.score += buyerPoints;
-    if (seller) seller.score += sellerPoints;
+    if (buyer) buyer.score += buyerCoins;
+    if (seller) seller.score += sellerCoins;
   }
   room.history.push({
     round: room.round, a: pair.a, b: pair.b, buyer: buyerId, seller: sellerId,
-    cardName: pair.card.name, values: pair.card.values, quantity: q, veto,
-    buyerPoints, sellerPoints,
-    table: Math.max(0, ...pair.card.values.map((value, i) => value + i * 5)) - (veto ? 0 : buyerPoints + sellerPoints),
-    mode: room.settings.mode, practice: !!room.practice, reason
+    cardName: pair.card.name, values: pair.card.values, quantity: noDeal ? 0 : q,
+    offerQuantity: offer?.quantity ?? null, mode: offer?.mode || room.settings.mode,
+    veto, noDeal, buyerCoins, sellerCoins, bestValue, actualValue, spiteVeto,
+    capturedPct: bestValue ? actualValue / bestValue * 100 : 0,
+    table: Math.max(0, bestValue - actualValue), practice: !!room.practice, reason
   });
   if (room.pairs.length && room.pairs.every(p => pairDone(room, p))) room.phase = 'reveal';
 }
 function makeOffer(room, pair, playerId, quantity) {
   room.offers[pair.a] = { pair: pair.a, quantity, mode: room.settings.mode, by: playerId };
   const buyerId = pair.roleA === 'Buyer' ? pair.a : pair.b;
-  if (buyerId === 'bot') {
-    const minimum = quantity;
-    if (room.settings.mode === 'menu') {
-      let bestQ = minimum, bestValue = pair.card.values[minimum];
-      for (let q = minimum + 1; q <= 6; q++) if (pair.card.values[q] > bestValue) { bestQ = q; bestValue = pair.card.values[q]; }
-      settle(room, pair, bestQ, { veto: bestValue < 0, reason: bestValue < 0 ? 'bot_veto' : null });
-    } else {
-      const veto = pair.card.values[minimum] < 0;
-      settle(room, pair, minimum, { veto, reason: veto ? 'bot_veto' : null });
-    }
+  if (buyerId !== 'bot') return;
+  const offer = room.offers[pair.a];
+  const min = offer.mode === 'menu' ? offer.quantity : offer.quantity;
+  const max = offer.mode === 'menu' ? 6 : offer.quantity;
+  let bestQ = min, bestNet = pair.card.values[min] - PRICE * min;
+  for (let q = min + 1; q <= max; q++) {
+    const net = pair.card.values[q] - PRICE * q;
+    if (net > bestNet) { bestQ = q; bestNet = net; }
   }
+  const veto = bestNet < 0;
+  settle(room, pair, bestQ, { veto, reason: veto ? 'bot_veto' : null });
 }
 function startRound(room, practice = false) {
-  const active = shuffle(room.players.filter(p => p.connected));
+  room.roundSitter = null;
+  let active = shuffle(room.players.filter(p => p.connected));
   if (active.length < 2) return false;
   if (active.length % 2) {
-    if (room.settings.odd === 'bot') active.push({ id: 'bot', name: 'Miso 🤖', score: 0, connected: true, lastRole: null });
-    else active.pop();
+    if (room.settings.odd === 'bot') {
+      active.push({ id: 'bot', name: 'Miso 🤖', score: 0, connected: true, lastRole: room.botLastRole, rotation: { buyer: 0, seller: 0, sitOut: 0 } });
+    } else {
+      const least = Math.min(...active.map(p => p.rotation?.sitOut || 0));
+      const tied = active.filter(p => (p.rotation?.sitOut || 0) === least);
+      const sitting = tied[crypto.randomInt(tied.length)];
+      active = active.filter(p => p.id !== sitting.id);
+      sitting.rotation ||= { buyer: 0, seller: 0, sitOut: 0 };
+      sitting.rotation.sitOut++;
+      room.roundSitter = sitting.id;
+    }
   }
   room.round++;
   room.practice = practice;
-  const previous = new Map(room.players.map(p => [p.id, p.lastRole]));
   const sellers = [], buyers = [], unknown = [];
   for (const player of active) {
-    const prior = previous.get(player.id);
-    if (prior === 'Seller') buyers.push(player);
-    else if (prior === 'Buyer') sellers.push(player);
+    if (player.lastRole === 'Seller') buyers.push(player);
+    else if (player.lastRole === 'Buyer') sellers.push(player);
     else unknown.push(player);
   }
   for (const player of shuffle(unknown)) (sellers.length <= buyers.length ? sellers : buyers).push(player);
+  // If a changing roster makes exact alternation unbalance the two role pools, flip only as many roles as needed.
   while (sellers.length > buyers.length) buyers.push(sellers.pop());
   while (buyers.length > sellers.length) sellers.push(buyers.pop());
-  for (const player of sellers) player.lastRole = 'Seller';
-  for (const player of buyers) player.lastRole = 'Buyer';
+  for (const player of sellers) {
+    player.lastRole = 'Seller';
+    if (player.id !== 'bot') { player.rotation ||= { buyer: 0, seller: 0, sitOut: 0 }; player.rotation.seller++; }
+    else room.botLastRole = 'Seller';
+  }
+  for (const player of buyers) {
+    player.lastRole = 'Buyer';
+    if (player.id !== 'bot') { player.rotation ||= { buyer: 0, seller: 0, sitOut: 0 }; player.rotation.buyer++; }
+    else room.botLastRole = 'Buyer';
+  }
   const shuffledSellers = shuffle(sellers), shuffledBuyers = shuffle(buyers);
   room.pairs = shuffledSellers.map((seller, i) => {
     const buyer = shuffledBuyers[i];
@@ -99,8 +132,7 @@ function startRound(room, practice = false) {
   room.offers = {}; room.messages = {};
   room.started = true;
   for (const pair of room.pairs) {
-    const sellerId = pair.roleA === 'Seller' ? pair.a : pair.b;
-    if (sellerId === 'bot') makeOffer(room, pair, 'bot', room.settings.mode === 'menu' ? 1 : 2);
+    if (pair.a === 'bot') makeOffer(room, pair, 'bot', 4); // Seller bot offers 4 in either offer mode.
   }
   return true;
 }
@@ -115,20 +147,6 @@ function advanceTime(room) {
     }
     if (room.phase !== 'trade') return;
     room.step = 'respond'; room.deadline = Date.now() + 20000;
-    for (const pair of room.pairs) {
-      const buyerId = pair.roleA === 'Buyer' ? pair.a : pair.b;
-      if (buyerId === 'bot' && room.offers[pair.a] && !pairDone(room, pair)) {
-        const offer = room.offers[pair.a], q = offer.quantity;
-        if (offer.mode === 'menu') {
-          let bestQ = q, best = pair.card.values[q];
-          for (let n = q + 1; n <= 6; n++) if (pair.card.values[n] > best) { bestQ = n; best = pair.card.values[n]; }
-          settle(room, pair, bestQ, { veto: best < 0, reason: best < 0 ? 'bot_veto' : null });
-        } else {
-          const veto = pair.card.values[q] < 0;
-          settle(room, pair, q, { veto, reason: veto ? 'bot_veto' : null });
-        }
-      }
-    }
   } else if (room.step === 'respond') {
     for (const pair of room.pairs) if (!pairDone(room, pair)) settle(room, pair, 0, { veto: true, reason: 'buyer_timeout' });
   }
@@ -136,14 +154,18 @@ function advanceTime(room) {
 function pub(room, pid) {
   const mine = room.pairs.find(p => p.a === pid || p.b === pid);
   const role = mine ? (mine.a === pid ? mine.roleA : mine.roleB) : null;
+  const visibleHistory = room.history.filter(h => h.round !== room.round || room.phase === 'reveal' || room.phase === 'ended');
+  const realHistory = room.history.filter(h => !h.practice);
+  const efficiency = realHistory.reduce((sum, h) => ({ actual: sum.actual + h.actualValue, best: sum.best + h.bestValue }), { actual: 0, best: 0 });
   return {
     code: room.code, hostId: room.hostId,
-    players: room.players.map(p => ({ id: p.id, name: p.name, score: p.score, connected: p.connected, role: room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null })),
+    players: room.players.map(p => ({ id: p.id, name: p.name, score: room.phase === 'ended' ? p.score : p.id === pid ? p.score : null, connected: p.connected, role: room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
     settings: room.settings, round: room.round, practice: !!room.practice, practiceDone: room.practiceDone,
     started: room.started, phase: room.phase, step: room.step,
     remainingMs: room.phase === 'trade' ? Math.max(0, room.deadline - Date.now()) : 0,
     yourRole: role, yourCard: role === 'Buyer' ? { name: mine.card.name, values: mine.card.values, color: mine.card.color } : null,
-    yourPair: mine ? mine.a : null, history: room.history, offer: mine ? room.offers[mine.a] || null : null,
+    yourPair: mine ? mine.a : null, history: visibleHistory, efficiency,
+    offer: mine ? room.offers[mine.a] || null : null,
     messages: mine ? room.messages[mine.a] || [] : [], yourId: pid
   };
 }
@@ -175,7 +197,7 @@ const server = http.createServer((req, res) => {
       let player = room.players.find(p => p.id === data.id);
       if (!player && room.started && !room.settings.lateJoin) return fail(res, 403, 'This game has already started. Ask the host to open a new room.');
       if (!player) {
-        player = { id: id(), name: String(data.name || 'Player').trim().slice(0, 18) || 'Player', score: 0, connected: true, lastSeen: Date.now(), lastRole: null };
+        player = { id: id(), name: String(data.name || 'Player').trim().slice(0, 18) || 'Player', score: 0, connected: true, lastSeen: Date.now(), lastRole: null, rotation: { buyer: 0, seller: 0, sitOut: 0 } };
         room.players.push(player);
       }
       player.connected = true; player.lastSeen = Date.now();
@@ -234,16 +256,18 @@ const server = http.createServer((req, res) => {
       startRound(room, false);
     }
     if (parts[2] === 'reset' && req.method === 'POST' && pid === room.hostId && room.phase !== 'trade') {
-      for (const p of room.players) { p.score = 0; p.lastRole = null; }
-      room.history = []; room.round = 0; room.practiceDone = false; room.started = false;
-      room.practice = false; room.phase = 'lobby'; room.step = null; room.pairs = []; room.offers = {}; room.messages = {};
+      for (const p of room.players) { p.score = 0; p.lastRole = null; p.rotation = { buyer: 0, seller: 0, sitOut: 0 }; }
+      room.history = []; room.round = 0; room.practiceDone = false; room.started = false; room.botLastRole = null;
+      room.practice = false; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {};
     }
     if (parts[2] === 'end' && req.method === 'POST' && pid === room.hostId) {
-      room.phase = 'ended'; room.endAt = Date.now() + 12000;
+      if (room.phase === 'trade') for (const pair of room.pairs) if (!pairDone(room, pair)) settle(room, pair, 0, { veto: true, reason: 'game_ended' });
+      room.phase = 'ended'; room.endAt = Date.now() + 30000;
       const endingCode = room.code;
-      setTimeout(() => rooms.delete(endingCode), 12000).unref?.();
+      setTimeout(() => rooms.delete(endingCode), 30000).unref?.();
     }
     return json(res, 200, pub(room, pid));
   });
 });
 server.listen(PORT, '0.0.0.0', () => console.log(`Hidden Appetite is running on http://localhost:${PORT}`));
+
