@@ -13,7 +13,11 @@ const cards = [
 const PRICE = 10;
 // Buyer-best-response check: Single q=4 gives seller 40.0, buyer 24.0 and 75% value captured;
 // Menu min=4 yields q=[4,4,6], seller 46.7, buyer 38.7 and 100%; Single q=6 seller avg is 20.0.
-const phrases = ['Sounds good 👍', 'Hmm… tempting 🤔', 'That’s too much 😅', 'Let’s make a deal 🤝', 'I’m hungry! 😋', 'No deal 🙅'];
+const phrases = {
+  Kitchen: ["Big portions today! 🍲", "Chef's special: a big plate! 🤌", "Trust me, you'll want more 😋", "That's my best offer 🤝", "Busy night — take it or leave it ⏰", "I can go lower… maybe 🤔", "Don't walk away hungry 🥺", "Everyone's ordering big today 📈"],
+  Customer: ["I'm barely hungry 🙂", "Just a snack for me 🥨", "I'm STARVING 🤤", "That's way too much 😅", "Make it smaller and we have a deal 🤝", "I'll walk away if I have to 🚶", "Sounds tasty 👍", "Hmm… let me think 🤔"],
+  Shared: ['😂', '👀', '🙏', '😤']
+};
 const id = () => crypto.randomBytes(8).toString('hex');
 const code = () => crypto.randomBytes(3).toString('hex').toUpperCase();
 const shuffle = list => {
@@ -28,8 +32,8 @@ function freshRoom(hostId, hostName) {
   return {
     code: code(), hostId,
     players: [{ id: hostId, name: hostName, score: 0, connected: true, lastSeen: Date.now(), lastRole: null, rotation: { buyer: 0, seller: 0, sitOut: 0 } }],
-    settings: { mode: 'menu', gamePlan: 'two', roundsPerAct: 4, chat: true, odd: 'sit', lateJoin: false },
-    round: 0, act: 0, actRound: 0, roundSitter: null, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0, botLastRole: null, leaderboardScores: {}, rankChanges: {}, topEarners: [], roundFinalized: false, finalReveal: false,
+    settings: { mode: 'menu', gamePlan: 'rotate', cycles: 2, chat: true, odd: 'sit', lateJoin: false },
+    round: 0, realRound: 0, block: 0, blockRound: 0, blockBannerUntil: 0, roundSitter: null, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0, botLastRole: null, leaderboardScores: {}, rankChanges: {}, topEarners: [], roundFinalized: false, finalReveal: false,
     pairs: [], history: [], offers: {}, messages: {}, endAt: 0
   };
 }
@@ -38,7 +42,8 @@ function plannedMode(room) {
   if (room.practice) return room.settings.gamePlan === 'manual' ? room.settings.mode : 'menu';
   if (room.settings.gamePlan === 'manual') return room.settings.mode;
   const first = room.settings.gamePlan === 'menu-first' ? 'menu' : 'single';
-  return room.act === 2 ? (first === 'single' ? 'menu' : 'single') : first;
+  const block = Math.max(1, room.block);
+  return (block - 1) % 2 === 0 ? first : first === 'single' ? 'menu' : 'single';
 }
 function freezeLeaderboard(room) {
   if (room.practice || room.roundFinalized) return;
@@ -59,7 +64,7 @@ function freezeLeaderboard(room) {
 }
 function settle(room, pair, quantity, { veto = false, reason = null } = {}) {
   if (!pair || pairDone(room, pair)) return;
-  const q = veto ? 0 : Math.max(0, Math.min(6, quantity));
+  const q = veto ? 0 : Math.max(1, Math.min(6, Number(quantity) || 1));
   const buyerId = pair.roleA === 'Buyer' ? pair.a : pair.b;
   const sellerId = buyerId === pair.a ? pair.b : pair.a;
   const buyer = room.players.find(p => p.id === buyerId);
@@ -82,7 +87,7 @@ function settle(room, pair, quantity, { veto = false, reason = null } = {}) {
     if (seller) seller.score += sellerCoins;
   }
   room.history.push({
-    round: room.round, act: room.act, actRound: room.actRound, a: pair.a, b: pair.b, buyer: buyerId, seller: sellerId,
+    round: room.round, realRound: room.realRound, block: room.block, blockRound: room.blockRound, a: pair.a, b: pair.b, buyer: buyerId, seller: sellerId,
     cardName: pair.card.name, values: pair.card.values, quantity: noDeal ? 0 : q,
     offerQuantity: offer?.quantity ?? null, mode: offer?.mode || room.settings.mode,
     veto, noDeal, buyerCoins, sellerCoins, bestValue, actualValue, spiteVeto,
@@ -92,7 +97,7 @@ function settle(room, pair, quantity, { veto = false, reason = null } = {}) {
   if (room.pairs.length && room.pairs.every(p => pairDone(room, p))) {
     room.phase = 'reveal';
     freezeLeaderboard(room);
-    if (!room.practice && room.settings.gamePlan !== 'manual' && room.act === 2 && room.actRound >= room.settings.roundsPerAct) {
+    if (!room.practice && room.settings.gamePlan !== 'manual' && room.realRound >= room.settings.cycles * 8) {
       room.phase = 'ended'; room.finalReveal = true; room.endAt = Date.now() + 30000;
     }
   }
@@ -115,8 +120,6 @@ function makeOffer(room, pair, playerId, quantity) {
 function startRound(room, practice = false) {
   room.roundSitter = null;
   room.practice = practice;
-  if (practice && room.settings.gamePlan !== 'manual') room.settings.mode = 'menu';
-  else room.settings.mode = plannedMode(room);
   let active = shuffle(room.players.filter(p => p.connected));
   if (active.length < 2) return false;
   if (active.length % 2) {
@@ -133,7 +136,10 @@ function startRound(room, practice = false) {
     }
   }
   room.round++;
-  if (!practice && room.settings.gamePlan !== 'manual') room.actRound++;
+  if (!practice) { room.realRound++; room.block = Math.ceil(room.realRound / 4); room.blockRound = ((room.realRound - 1) % 4) + 1; }
+  else { room.block = 0; room.blockRound = 0; }
+  room.settings.mode = plannedMode(room);
+  room.blockBannerUntil = !practice && room.settings.gamePlan !== 'manual' && room.blockRound === 1 ? Date.now() + 4000 : 0;
   const sellers = [], buyers = [], unknown = [];
   for (const player of active) {
     if (player.lastRole === 'Seller') buyers.push(player);
@@ -190,16 +196,16 @@ function pub(room, pid) {
   const realHistory = room.history.filter(h => !h.practice);
   const efficiency = realHistory.reduce((sum, h) => ({ actual: sum.actual + h.actualValue, best: sum.best + h.bestValue }), { actual: 0, best: 0 });
   const maxAbsEarnings = Math.max(...cards.flatMap(card => card.values.map((value, q) => Math.abs(value - PRICE * q))));
-  const sellerCurves = role === 'Seller' && !room.practice ? cards.map(card => ({ name: card.name.replace(' appetite', ''), shape: card.values.map((value, q) => { const earnings = value - PRICE * q; const rounded = Number((earnings / maxAbsEarnings).toFixed(1)); return rounded === 0 && earnings < 0 ? -0.1 : rounded; }) })) : null;
+  const sellerCurves = role === 'Seller' && !room.practice ? cards.map(card => ({ name: card.name.replace(' appetite', ''), shape: card.values.slice(1).map((value, index) => { const q = index + 1; const earnings = value - PRICE * q; const rounded = Number((earnings / maxAbsEarnings).toFixed(1)); return rounded === 0 && earnings < 0 ? -0.1 : rounded; }) })) : null;
   const practiceCards = role === 'Seller' && room.practice ? cards.map(card => ({ name: card.name, values: card.values, color: card.color })) : null;
   return {
     code: room.code, hostId: room.hostId,
     players: room.players.map(p => ({ id: p.id, name: p.name, score: room.leaderboardScores[p.id] || 0, connected: p.connected, role: room.phase === 'trade' ? null : room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
-    settings: room.settings, round: room.round, act: room.act, actRound: room.actRound, roundsPerAct: room.settings.roundsPerAct, plannedMode: plannedMode(room), rankChanges: room.rankChanges, topEarners: room.topEarners, finalReveal: room.finalReveal, practice: !!room.practice, practiceDone: room.practiceDone,
+    settings: room.settings, round: room.round, realRound: room.realRound, block: room.block, blockRound: room.blockRound, totalBlocks: room.settings.cycles * 2, plannedMode: plannedMode(room), blockBanner: Date.now() < room.blockBannerUntil ? (room.settings.mode === 'menu' ? 'NOW: THE MENU 🍽️ — the kitchen sets a minimum, the customer picks any amount from that minimum up to 6, or says no.' : 'NOW: TAKE IT OR LEAVE IT 🎯 — the kitchen offers one fixed number of servings.') : '', rankChanges: room.rankChanges, topEarners: room.topEarners, finalReveal: room.finalReveal, practice: !!room.practice, practiceDone: room.practiceDone,
     started: room.started, phase: room.phase, step: room.step,
     remainingMs: room.phase === 'trade' ? Math.max(0, room.deadline - Date.now()) : 0,
     yourRole: role, yourCard: role === 'Buyer' ? { name: mine.card.name, values: mine.card.values, color: mine.card.color } : null,
-    sellerCurves, practiceCards,
+    sellerCurves, practiceCards, chatPhrases: role ? [...phrases[role === 'Seller' ? 'Kitchen' : 'Customer'], ...phrases.Shared] : [],
     yourPair: mine ? mine.a : null, history: visibleHistory, efficiency,
     offer: mine ? room.offers[mine.a] || null : null,
     messages: mine ? room.messages[mine.a] || [] : [], yourId: pid
@@ -258,49 +264,51 @@ const server = http.createServer((req, res) => {
       return json(res, 200, { ok: true });
     }
     if (parts[2] === 'settings' && req.method === 'POST' && pid === room.hostId && room.phase !== 'trade') {
-      const allowed = ['mode', 'gamePlan', 'roundsPerAct', 'chat', 'odd', 'lateJoin'];
-      for (const key of allowed) { if (!(key in (data.settings || {}))) continue; if (room.started && (key === 'gamePlan' || key === 'roundsPerAct' || (key === 'mode' && room.settings.gamePlan !== 'manual'))) continue; room.settings[key] = data.settings[key]; }
-      if (![2,4,6].includes(Number(room.settings.roundsPerAct))) room.settings.roundsPerAct = 4;
-      if (!['two','menu-first','manual'].includes(room.settings.gamePlan)) room.settings.gamePlan = 'two';
+      const allowed = ['mode', 'gamePlan', 'cycles', 'chat', 'odd', 'lateJoin'];
+      for (const key of allowed) { if (!(key in (data.settings || {}))) continue; if (room.started && (key === 'gamePlan' || key === 'cycles' || (key === 'mode' && room.settings.gamePlan !== 'manual'))) continue; room.settings[key] = data.settings[key]; }
+      if (![1,2,3].includes(Number(room.settings.cycles))) room.settings.cycles = 2;
+      if (!['rotate','menu-first','manual'].includes(room.settings.gamePlan)) room.settings.gamePlan = 'rotate';
     }
     if (parts[2] === 'start' && req.method === 'POST' && pid === room.hostId && room.phase === 'lobby') {
       const practice = !!data.practice;
-      if (!practice && room.settings.gamePlan !== 'manual') { room.act = 1; room.actRound = 0; }
+      if (!practice) { room.realRound = 0; room.block = 0; room.blockRound = 0; }
       if (startRound(room, practice) && practice) room.practiceDone = false;
     }
     if (parts[2] === 'offer' && req.method === 'POST' && room.phase === 'trade' && room.step === 'offer') {
       const pair = room.pairs.find(p => (p.a === pid || p.b === pid) && (p.roleA === 'Seller' ? p.a === pid : p.b === pid));
-      if (pair && !pairDone(room, pair)) makeOffer(room, pair, pid, Math.max(0, Math.min(6, Number(data.quantity) || 0)));
+      if (!Number.isInteger(Number(data.quantity)) || Number(data.quantity) < 1 || Number(data.quantity) > 6) return fail(res, 400, 'Choose 1 to 6 servings.');
+      if (pair && !pairDone(room, pair)) makeOffer(room, pair, pid, Number(data.quantity));
     }
     if (parts[2] === 'respond' && req.method === 'POST' && room.phase === 'trade' && room.step === 'respond') {
       const pair = room.pairs.find(p => (p.a === pid || p.b === pid) && (p.roleA === 'Buyer' ? p.a === pid : p.b === pid));
       const offer = pair && room.offers[pair.a];
       if (pair && offer && !pairDone(room, pair)) {
         const veto = !!data.veto;
-        const quantity = room.settings.mode === 'menu' ? Math.max(offer.quantity, Math.min(6, Number(data.quantity) || offer.quantity)) : offer.quantity;
+        const requested = Number(data.quantity);
+        if (!veto && (!Number.isInteger(requested) || requested < 1 || requested > 6)) return fail(res, 400, 'Choose 1 to 6 servings, or veto.');
+        if (!veto && offer.mode === 'menu' && requested < offer.quantity) return fail(res, 400, `Choose at least ${offer.quantity} servings, or veto.`);
+        const quantity = offer.mode === 'menu' ? (veto ? offer.quantity : requested) : offer.quantity;
         settle(room, pair, quantity, { veto });
       }
     }
-    if (parts[2] === 'message' && req.method === 'POST' && room.settings.chat && room.phase === 'trade' && phrases.includes(data.text)) {
+    if (parts[2] === 'message' && req.method === 'POST') {
+      if (!room.settings.chat || room.phase !== 'trade') return fail(res, 403, 'Chat is not available now.');
       const pair = room.pairs.find(p => p.a === pid || p.b === pid);
-      if (pair && !pairDone(room, pair)) {
-        const thread = room.messages[pair.a] || (room.messages[pair.a] = []);
-        thread.push({ id: pid, text: data.text });
-        if (thread.length > 30) thread.shift();
-      }
+      if (!pair || pairDone(room, pair)) return fail(res, 403, 'You are not in an active chat.');
+      const seller = pair.roleA === 'Seller' ? pair.a : pair.b;
+      const rolePhrases = pid === seller ? phrases.Kitchen : phrases.Customer;
+      if (![...rolePhrases, ...phrases.Shared].includes(data.text)) return fail(res, 400, 'That phrase is not available for your role.');
+      const thread = room.messages[pair.a] || (room.messages[pair.a] = []);
+      thread.push({ id: pid, text: data.text });
+      if (thread.length > 30) thread.shift();
     }
     if (parts[2] === 'next' && req.method === 'POST' && pid === room.hostId && room.phase === 'reveal') {
-      if (room.practice) { room.practiceDone = true; room.act = room.settings.gamePlan === 'manual' ? 0 : 1; room.actRound = 0; startRound(room, false); }
-      else if (room.settings.gamePlan !== 'manual' && room.act === 1 && room.actRound >= room.settings.roundsPerAct) room.phase = 'transition';
-      else if (room.settings.gamePlan === 'manual') startRound(room, false);
-      else if (room.phase === 'reveal') startRound(room, false);
-    }
-    if (parts[2] === 'start-act-2' && req.method === 'POST' && pid === room.hostId && room.phase === 'transition') {
-      room.act = 2; room.actRound = 0; startRound(room, false);
+      if (room.practice) { room.practiceDone = true; room.realRound = 0; room.block = 0; room.blockRound = 0; startRound(room, false); }
+      else if (room.settings.gamePlan === 'manual' || room.realRound < room.settings.cycles * 8) startRound(room, false);
     }
     if (parts[2] === 'reset' && req.method === 'POST' && pid === room.hostId && room.phase !== 'trade') {
       for (const p of room.players) { p.score = 0; p.lastRole = null; p.rotation = { buyer: 0, seller: 0, sitOut: 0 }; }
-      room.history = []; room.round = 0; room.act = 0; room.actRound = 0; room.practiceDone = false; room.started = false; room.botLastRole = null; room.leaderboardScores = {}; room.rankChanges = {}; room.topEarners = []; room.roundFinalized = false; room.finalReveal = false;
+      room.history = []; room.round = 0; room.realRound = 0; room.block = 0; room.blockRound = 0; room.blockBannerUntil = 0; room.practiceDone = false; room.started = false; room.botLastRole = null; room.leaderboardScores = {}; room.rankChanges = {}; room.topEarners = []; room.roundFinalized = false; room.finalReveal = false;
       room.practice = false; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {};
     }
     if (parts[2] === 'end' && req.method === 'POST' && pid === room.hostId) {
