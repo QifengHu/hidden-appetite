@@ -256,7 +256,7 @@ function pub(room, pid) {
   const role = mine ? (mine.a === pid ? mine.roleA : mine.roleB) : null;
   const currentPair = h => h.a === pid || h.b === pid;
   const stripPlayers = ({ a, b, buyer, seller, ...result }) => result;
-  const visibleHistory = room.history.filter(h => h.round !== room.round || currentPair(h)).map(stripPlayers);
+  const visibleHistory = room.history.filter(h => room.phase === 'ended' || h.round !== room.round || currentPair(h)).map(stripPlayers);
   const yourReveal = (room.phase === 'reveal' || room.phase === 'ended') ? (room.history.find(h => h.round === room.round && currentPair(h)) || null) : null;
   const realHistory = room.history.filter(h => !h.practice);
   const efficiency = realHistory.reduce((sum, h) => ({ actual: sum.actual + h.actualValue, best: sum.best + h.bestValue }), { actual: 0, best: 0 });
@@ -264,10 +264,15 @@ function pub(room, pid) {
   const sellerCurves = role === 'Seller' && !room.practice ? cards.map(card => ({ name: card.name.replace(' appetite', ''), shape: card.values.slice(1).map((value, index) => { const q = index + 1; const earnings = value - PRICE * q; const rounded = Number((earnings / maxAbsEarnings).toFixed(1)); return rounded === 0 && earnings < 0 ? -0.1 : rounded; }) })) : null;
   const practiceCards = role === 'Seller' && room.practice ? cards.map(card => ({ name: card.name, values: card.values, color: card.color })) : null;
   const readyPlayers = room.players.filter(p => p.id !== 'bot' && p.connected);
+  const roundCoins = Object.fromEntries(room.players.filter(p => p.id !== 'bot').map(p => [p.id, 0]));
+  if (!room.practice) for (const h of room.history.filter(h => h.round === room.round && !h.practice)) {
+    if (h.buyer !== 'bot' && Object.hasOwn(roundCoins, h.buyer)) roundCoins[h.buyer] += h.buyerCoins;
+    if (h.seller !== 'bot' && Object.hasOwn(roundCoins, h.seller)) roundCoins[h.seller] += h.sellerCoins;
+  }
   return {
     code: room.code, hostId: room.hostId, awayThisRound: room.awayThisRound || 0, readiness: { ready: readyPlayers.filter(p => room.ready?.[p.id]).length, total: readyPlayers.length },
     players: room.players.map(p => ({ id: p.id, name: p.name, score: room.leaderboardScores[p.id] || 0, connected: p.connected, ready: !!room.ready?.[p.id], role: room.phase === 'trade' ? null : room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
-    settings: room.settings, round: room.round, realRound: room.realRound, totalRounds: room.settings.cycles * 4, block: room.block, blockRound: room.blockRound, totalBlocks: room.settings.cycles * 2, plannedMode: plannedMode(room), transitionMode: room.transitionMode, transitionFullRules: room.transitionFullRules, transitionSummary: room.history.filter(h => !h.practice && h.block === room.block).map(stripPlayers), transitionPending: room.phase === 'reveal' && (room.practice ? room.practiceRound >= 2 : plannedMode(room,room.realRound + 1) !== (room.settings.gamePlan === 'manual' ? (room.history.find(h => h.round === room.round)?.mode || room.settings.mode) : room.settings.mode)), rankChanges: room.rankChanges, topEarners: room.topEarners, finalReveal: room.finalReveal, practice: !!room.practice, practiceRound: room.practiceRound, practiceDone: room.practiceDone,
+    settings: room.settings, round: room.round, realRound: room.realRound, totalRounds: room.settings.cycles * 4, block: room.block, blockRound: room.blockRound, totalBlocks: room.settings.cycles * 2, plannedMode: plannedMode(room), transitionMode: room.transitionMode, transitionFullRules: room.transitionFullRules, transitionSummary: room.history.filter(h => !h.practice && h.block === room.block).map(stripPlayers), transitionPending: room.phase === 'reveal' && (room.practice ? room.practiceRound >= 2 : plannedMode(room,room.realRound + 1) !== (room.settings.gamePlan === 'manual' ? (room.history.find(h => h.round === room.round)?.mode || room.settings.mode) : room.settings.mode)), rankChanges: room.rankChanges, topEarners: room.topEarners, roundCoins, finalReveal: room.finalReveal, practice: !!room.practice, practiceRound: room.practiceRound, practiceDone: room.practiceDone,
     started: room.started, phase: room.phase, step: room.step,
     remainingMs: room.phase === 'trade' ? Math.max(0, room.deadline - Date.now()) : 0,
     yourRole: role, partnerIsBot: !!mine && (mine.a === 'bot' || mine.b === 'bot'), yourReveal: yourReveal ? stripPlayers(yourReveal) : null, yourCard: role === 'Buyer' ? { name: mine.card.name, values: mine.card.values, color: mine.card.color } : null,
