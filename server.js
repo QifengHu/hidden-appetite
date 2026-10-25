@@ -7,13 +7,14 @@ const PORT = Number(process.env.PORT || 3000);
 const rooms = new Map();
 const ROOM_IDLE_MS = 2 * 60 * 60 * 1000;
 const cards = [
-  { name: 'Small appetite', values: [0, 24, 44, 51, 56, 40, 36], color: 'mint' },
-  { name: 'Medium appetite', values: [0, 8, 28, 57, 80, 80, 54], color: 'blue' },
-  { name: 'Large appetite', values: [0, 8, 18, 36, 56, 90, 120], color: 'coral' }
+  { name: 'Small appetite', values: [0, 28, 50, 54, 52, 42, 30], color: 'mint' },
+  { name: 'Medium appetite', values: [0, 5, 35, 70, 95, 85, 50], color: 'blue' },
+  { name: 'Large appetite', values: [0, 5, 17, 45, 75, 110, 140], color: 'coral' }
 ];
 const PRICE = 10;
-// Buyer-best-response check: Single q=4 gives seller 40.0, buyer 24.0 and 75% value captured;
-// Menu min=4 yields q=[4,4,6], seller 46.7, buyer 38.7 and 100%; Single q=6 seller avg is 20.0.
+// Buyer-best-response check: Single q=4: kitchen 40.0, customer 34.0, 77% value captured.
+// Menu min=4: choices [4,4,6], kitchen 46.7, customer 49.0, 99% value captured.
+// Single q=6: Small and Medium veto, kitchen avg 20.0.
 const phrases = {
   Kitchen: ["Big portions today! 🍲", "Chef's special: a big plate! 🤌", "Trust me, you'll want more 😋", "That's my best offer 🤝", "Busy night — take it or leave it ⏰", "I can go lower… maybe 🤔", "Don't walk away hungry 🥺", "Everyone's ordering big today 📈"],
   Customer: ["I'm barely hungry 🙂", "Just a snack for me 🥨", "I'm STARVING 🤤", "That's way too much 😅", "Make it smaller and we have a deal 🤝", "I'll walk away if I have to 🚶", "Sounds tasty 👍", "Hmm… let me think 🤔"],
