@@ -382,6 +382,17 @@ const server = http.createServer((req, res) => {
         settle(room, pair, quantity, { veto });
       }
     }
+    if (parts[2] === 'message' && req.method === 'POST') {
+      if (!room.settings.chat || room.phase !== 'trade' || room.step === 'talk') return fail(res, 403, 'Chat is not available now.');
+      const pair = room.pairs.find(p => p.a === pid || p.b === pid);
+      if (!pair || pairDone(room, pair)) return fail(res, 403, 'You are not in an active chat.');
+      const seller = pair.roleA === 'Seller' ? pair.a : pair.b;
+      const rolePhrases = pid === seller ? phrases.Kitchen : phrases.Customer;
+      if (![...rolePhrases, ...phrases.Shared].includes(data.text)) return fail(res, 400, 'That phrase is not available for your role.');
+      const thread = room.messages[pair.a] || (room.messages[pair.a] = []);
+      thread.push({ id: pid, text: data.text });
+      if (thread.length > 30) thread.shift();
+    }
     if (parts[2] === 'ready' && req.method === 'POST' && (room.phase === 'reveal' || room.phase === 'transition')) {
       room.ready[pid] = true;
       advanceIfReady(room);
