@@ -44,6 +44,7 @@ function enter() {
   $('#roomEyebrow').textContent = 'YOUR DINNER PARTY · ' + roomCode;
   actionKey = cardKey = offerKey = chatKey = threadKey = revealKey = playersKey = leaderKey = '';
   clearInterval(pollTimer); poll(); pollTimer = setInterval(poll, 850);
+  clearInterval(clockTimer); clockTimer = setInterval(paintClock, 200);
 }
 async function poll() {
   if (!roomCode) return;
@@ -108,6 +109,7 @@ function render() {
   }
   $('#leaderboardBox').classList.toggle('hidden', !state.started);
   $('#lobbyHint').classList.toggle('hidden', state.phase !== 'lobby');
+  $('#lobbyHint').textContent = host && state.phase === 'lobby' && state.players.filter(p => p.connected).length === 1 && self?.id === state.hostId ? 'Playing solo? Start the practice round — Miso 🤖 will play with you.' : 'Share the code. Once two or more players have joined, start your first round.';
   $('#tradebox').classList.toggle('hidden', state.phase !== 'trade');
   $('#revealbox').classList.toggle('hidden', state.phase !== 'reveal');
   $('#transitionBox').classList.toggle('hidden', state.phase !== 'transition');

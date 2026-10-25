@@ -14,14 +14,14 @@ Open `http://localhost:3000` to host. To let phones on the same Wi-Fi join, open
 
 ## How to play
 
-1. Host a room and share the six-character code or invite QR.
-2. Choose an offer style and optionally run the practice round. A normal trade gives sellers up to 30 seconds to offer and buyers up to 20 seconds to respond; it ends as soon as every pair finishes.
-3. Players are paired randomly. Roles swap between rounds. Players who disconnect are marked away and skipped until they reconnect.
-4. Buyers privately see one of three appetite cards. In practice, the kitchen sees all three cards; during real rounds it sees appetite summaries, then chooses one quantity or sets a minimum; buyers accept, veto, or pick a quantity from the menu.
-5. After each round, the table sees the appetite card, both coin payoffs, and value left on the table. Practice coins do not affect scores or the Lab Report.
+1. Host one room and project its room code; players join from their phones. No logins are needed.
+2. An optional practice round introduces the game. If you are alone, start practice and Miso 🤖 will play with you.
+3. Each round, the customer sends a signal that may be truthful or a bluff (15 seconds). Then the kitchen makes an offer: one serving count in Take it or leave it, or a minimum in The Menu (30 seconds). The customer accepts, chooses an amount from the menu, or vetoes (20 seconds).
+4. The customer earns the card's worth minus 10 coins per serving; the kitchen earns 10 coins per serving. No deal gives both players 0 coins.
+5. Modes alternate in two-round blocks, and roles swap every round. A transition screen announces each mode switch.
+6. Follow the live leaderboard and table efficiency meter during play. The end-of-game Lab Report compares the two modes.
 
-Preset table talk can be switched off. Chat phrases are private to the paired players. With an odd number of players, the host can sit one player out or pair one player with Miso, the simple house bot. Rejoining with the same browser session restores the player identity. New players are blocked after the game starts unless the host enables late joining; those players join the next round.
-
+Inspired by research on veto bargaining and delegation (Kartik, Kleiner & Van Weelden, 2021).
 ## Notes
 
 This is a lightweight prototype: rooms are in-memory and disappear when the server restarts. For a public production game, use persistent room storage and an HTTPS deployment. The QR image is rendered by a third-party QR image endpoint and requires internet access on the host screen.

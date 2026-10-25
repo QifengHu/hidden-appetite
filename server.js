@@ -136,6 +136,9 @@ function startRound(room, practice = false) {
   room.roundSitter = null;
   room.practice = practice;
   let active = shuffle(room.players.filter(p => p.connected));
+  if (active.length === 1) {
+    active.push({ id: 'bot', name: 'Miso 🤖', score: 0, connected: true, lastRole: room.botLastRole, rotation: { buyer: 0, seller: 0, sitOut: 0 } });
+  }
   if (active.length < 2) return false;
   if (active.length % 2) {
     if (room.settings.odd === 'bot') {
