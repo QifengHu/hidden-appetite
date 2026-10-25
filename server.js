@@ -5,6 +5,7 @@ const crypto = require('crypto');
 
 const PORT = Number(process.env.PORT || 3000);
 const rooms = new Map();
+const ROOM_IDLE_MS = 2 * 60 * 60 * 1000;
 const cards = [
   { name: 'Small appetite', values: [0, 24, 44, 51, 56, 40, 36], color: 'mint' },
   { name: 'Medium appetite', values: [0, 8, 28, 57, 80, 80, 54], color: 'blue' },
@@ -18,7 +19,12 @@ const phrases = {
   Customer: ["I'm barely hungry 🙂", "Just a snack for me 🥨", "I'm STARVING 🤤", "That's way too much 😅", "Make it smaller and we have a deal 🤝", "I'll walk away if I have to 🚶", "Sounds tasty 👍", "Hmm… let me think 🤔"],
   Shared: ['😂', '👀', '🙏', '😤']
 };
-const id = () => crypto.randomBytes(8).toString('hex');
+const customerSignals = [
+  { text: 'Just a snack for me 🥨', kind: 'small' },
+  { text: 'A normal meal 🍽️', kind: 'medium' },
+  { text: "I'm STARVING 🤤", kind: 'large' },
+  { text: 'Not telling 🤐', kind: 'secret' }
+];const id = () => crypto.randomBytes(8).toString('hex');
 const code = () => crypto.randomBytes(3).toString('hex').toUpperCase();
 const shuffle = list => {
   const a = [...list];
@@ -32,17 +38,17 @@ function freshRoom(hostId, hostName) {
   return {
     code: code(), hostId,
     players: [{ id: hostId, name: hostName, score: 0, connected: true, lastSeen: Date.now(), lastRole: null, rotation: { buyer: 0, seller: 0, sitOut: 0 } }],
-    settings: { mode: 'menu', gamePlan: 'rotate', cycles: 2, chat: true, odd: 'sit', lateJoin: false },
-    round: 0, realRound: 0, block: 0, blockRound: 0, blockBannerUntil: 0, roundSitter: null, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0, botLastRole: null, leaderboardScores: {}, rankChanges: {}, topEarners: [], roundFinalized: false, finalReveal: false,
-    pairs: [], history: [], offers: {}, messages: {}, endAt: 0
+    settings: { mode: 'menu', gamePlan: 'rotate', cycles: 4, chat: true, customerSpeaksFirst: true, odd: 'sit', lateJoin: false },
+    round: 0, realRound: 0, block: 0, blockRound: 0, roundSitter: null, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0, transitionMode: null, transitionFullRules: false, seenModes: [], botLastRole: null, leaderboardScores: {}, rankChanges: {}, topEarners: [], roundFinalized: false, finalReveal: false, signals: {}, lastActivity: Date.now(),
+    pairs: [], history: [], offers: {}, messages: {}
   };
 }
 function pairDone(room, pair) { return room.history.some(h => h.round === room.round && h.a === pair.a); }
-function plannedMode(room) {
+function plannedMode(room, realRound = null) {
   if (room.practice) return room.settings.gamePlan === 'manual' ? room.settings.mode : 'menu';
   if (room.settings.gamePlan === 'manual') return room.settings.mode;
   const first = room.settings.gamePlan === 'menu-first' ? 'menu' : 'single';
-  const block = Math.max(1, room.block);
+  const block = Math.max(1, realRound == null ? room.block : Math.ceil(realRound / 2));
   return (block - 1) % 2 === 0 ? first : first === 'single' ? 'menu' : 'single';
 }
 function freezeLeaderboard(room) {
@@ -73,6 +79,7 @@ function settle(room, pair, quantity, { veto = false, reason = null } = {}) {
   const buyerCoins = noDeal ? 0 : pair.card.values[q] - PRICE * q;
   const sellerCoins = noDeal ? 0 : PRICE * q;
   const offer = room.offers[pair.a];
+  const signal = room.signals[pair.a] || null;
   let bestBuyerCoins = -Infinity;
   if (offer) {
     const start = offer.mode === 'menu' ? offer.quantity : offer.quantity;
@@ -92,13 +99,13 @@ function settle(room, pair, quantity, { veto = false, reason = null } = {}) {
     offerQuantity: offer?.quantity ?? null, mode: offer?.mode || room.settings.mode,
     veto, noDeal, buyerCoins, sellerCoins, bestValue, actualValue, spiteVeto,
     capturedPct: bestValue ? actualValue / bestValue * 100 : 0,
-    table: Math.max(0, bestValue - actualValue), practice: !!room.practice, reason
+    table: Math.max(0, bestValue - actualValue), practice: !!room.practice, reason, signal: signal?.text || null, signalKind: signal?.kind || null, bluff: !!signal?.bluff
   });
   if (room.pairs.length && room.pairs.every(p => pairDone(room, p))) {
     room.phase = 'reveal';
     freezeLeaderboard(room);
-    if (!room.practice && room.settings.gamePlan !== 'manual' && room.realRound >= room.settings.cycles * 8) {
-      room.phase = 'ended'; room.finalReveal = true; room.endAt = Date.now() + 30000;
+    if (!room.practice && room.settings.gamePlan !== 'manual' && room.realRound >= room.settings.cycles * 4) {
+      room.phase = 'ended'; room.finalReveal = true;
     }
   }
 }
@@ -107,6 +114,7 @@ function makeOffer(room, pair, playerId, quantity) {
   const buyerId = pair.roleA === 'Buyer' ? pair.a : pair.b;
   if (buyerId !== 'bot') return;
   const offer = room.offers[pair.a];
+  const signal = room.signals[pair.a] || null;
   const min = offer.mode === 'menu' ? offer.quantity : offer.quantity;
   const max = offer.mode === 'menu' ? 6 : offer.quantity;
   let bestQ = min, bestNet = pair.card.values[min] - PRICE * min;
@@ -116,6 +124,12 @@ function makeOffer(room, pair, playerId, quantity) {
   }
   const veto = bestNet < 0;
   settle(room, pair, bestQ, { veto, reason: veto ? 'bot_veto' : null });
+}
+function enterTransition(room, mode) {
+  room.phase = 'transition'; room.step = null; room.transitionMode = mode;
+  room.transitionFullRules = !room.seenModes.includes(mode);
+  if (room.transitionFullRules) room.seenModes.push(mode);
+  room.deadline = Date.now() + 15000;
 }
 function startRound(room, practice = false) {
   room.roundSitter = null;
@@ -136,10 +150,10 @@ function startRound(room, practice = false) {
     }
   }
   room.round++;
-  if (!practice) { room.realRound++; room.block = Math.ceil(room.realRound / 4); room.blockRound = ((room.realRound - 1) % 4) + 1; }
+  if (!practice) { room.realRound++; room.block = Math.ceil(room.realRound / 2); room.blockRound = ((room.realRound - 1) % 2) + 1; }
   else { room.block = 0; room.blockRound = 0; }
-  room.settings.mode = plannedMode(room);
-  room.blockBannerUntil = !practice && room.settings.gamePlan !== 'manual' && room.blockRound === 1 ? Date.now() + 4000 : 0;
+  room.settings.mode = plannedMode(room); room.transitionMode = null;
+  
   const sellers = [], buyers = [], unknown = [];
   for (const player of active) {
     if (player.lastRole === 'Seller') buyers.push(player);
@@ -166,23 +180,40 @@ function startRound(room, practice = false) {
     const card = cards[crypto.randomInt(cards.length)];
     return { a: seller.id, b: buyer.id, roleA: 'Seller', roleB: 'Buyer', card, cardType: cards.indexOf(card) };
   });
-  room.phase = 'trade'; room.step = 'offer'; room.deadline = Date.now() + 30000; room.roundFinalized = false;
-  room.offers = {}; room.messages = {};
+  room.phase = 'trade'; room.step = room.settings.customerSpeaksFirst ? 'talk' : 'offer'; room.deadline = Date.now() + (room.step === 'talk' ? 15000 : 30000); room.roundFinalized = false;
+  room.offers = {}; room.messages = {}; room.signals = {};
   room.started = true;
   for (const pair of room.pairs) {
-    if (pair.a === 'bot') makeOffer(room, pair, 'bot', 4); // Seller bot offers 4 in either offer mode.
+    const buyerId = pair.roleA === 'Buyer' ? pair.a : pair.b;
+    if (room.settings.customerSpeaksFirst && buyerId === 'bot') {
+      const signal = customerSignals[pair.cardType];
+      room.signals[pair.a] = { buyer: 'bot', text: signal.text, kind: signal.kind, bluff: false };
+    }
+    if (room.step === 'offer' && pair.a === 'bot') makeOffer(room, pair, 'bot', 4);
   }
+  if (room.step === 'talk' && room.pairs.filter(p => (p.roleA === 'Buyer' ? p.a : p.b) !== 'bot').every(p => room.signals[p.a])) closeTalk(room);
   return true;
 }
+function closeTalk(room) {
+  room.step = 'offer'; room.deadline = Date.now() + 30000;
+  for (const pair of room.pairs) if (pair.a === 'bot' && !pairDone(room,pair)) makeOffer(room,pair,'bot',4);
+}
 function advanceTime(room) {
-  if (room.phase === 'ended' && Date.now() >= room.endAt) { rooms.delete(room.code); return; }
+  if (room.phase === 'transition' && Date.now() >= room.deadline) { startRound(room, false); return; }
   if (room.phase !== 'trade') return;
+  if (room.step === 'talk') {
+    const buyers = room.pairs.filter(p => p.roleA === 'Buyer' ? p.a !== 'bot' : p.b !== 'bot');
+    const allSpoke = buyers.every(p => room.signals[p.a]);
+    if (allSpoke || Date.now() >= room.deadline) {
+      for (const pair of buyers) if (!room.signals[pair.a]) room.signals[pair.a] = { buyer: pair.roleA === 'Buyer' ? pair.a : pair.b, text: '… (no comment)', kind: 'none', bluff: false };
+      closeTalk(room); return;
+    }
+    return;
+  }
   const sellersFinished = room.step === 'offer' && room.pairs.every(p => pairDone(room, p) || room.offers[p.a]);
   if (Date.now() < room.deadline && !sellersFinished) return;
   if (room.step === 'offer') {
-    for (const pair of room.pairs) {
-      if (!pairDone(room, pair) && !room.offers[pair.a]) settle(room, pair, 0, { veto: true, reason: 'seller_timeout' });
-    }
+    for (const pair of room.pairs) if (!pairDone(room, pair) && !room.offers[pair.a]) settle(room, pair, 0, { veto: true, reason: 'seller_timeout' });
     if (room.phase !== 'trade') return;
     room.step = 'respond'; room.deadline = Date.now() + 20000;
   } else if (room.step === 'respond') {
@@ -192,7 +223,7 @@ function advanceTime(room) {
 function pub(room, pid) {
   const mine = room.pairs.find(p => p.a === pid || p.b === pid);
   const role = mine ? (mine.a === pid ? mine.roleA : mine.roleB) : null;
-  const visibleHistory = room.history.filter(h => h.round !== room.round || room.phase === 'reveal' || room.phase === 'ended');
+  const visibleHistory = room.history.filter(h => h.round !== room.round || room.phase === 'reveal' || room.phase === 'transition' || room.phase === 'ended');
   const realHistory = room.history.filter(h => !h.practice);
   const efficiency = realHistory.reduce((sum, h) => ({ actual: sum.actual + h.actualValue, best: sum.best + h.bestValue }), { actual: 0, best: 0 });
   const maxAbsEarnings = Math.max(...cards.flatMap(card => card.values.map((value, q) => Math.abs(value - PRICE * q))));
@@ -201,11 +232,11 @@ function pub(room, pid) {
   return {
     code: room.code, hostId: room.hostId,
     players: room.players.map(p => ({ id: p.id, name: p.name, score: room.leaderboardScores[p.id] || 0, connected: p.connected, role: room.phase === 'trade' ? null : room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
-    settings: room.settings, round: room.round, realRound: room.realRound, block: room.block, blockRound: room.blockRound, totalBlocks: room.settings.cycles * 2, plannedMode: plannedMode(room), blockBanner: Date.now() < room.blockBannerUntil ? (room.settings.mode === 'menu' ? 'NOW: THE MENU 🍽️ — the kitchen sets a minimum, the customer picks any amount from that minimum up to 6, or says no.' : 'NOW: TAKE IT OR LEAVE IT 🎯 — the kitchen offers one fixed number of servings.') : '', rankChanges: room.rankChanges, topEarners: room.topEarners, finalReveal: room.finalReveal, practice: !!room.practice, practiceDone: room.practiceDone,
+    settings: room.settings, round: room.round, realRound: room.realRound, totalRounds: room.settings.cycles * 4, block: room.block, blockRound: room.blockRound, totalBlocks: room.settings.cycles * 2, plannedMode: plannedMode(room), transitionMode: room.transitionMode, transitionFullRules: room.transitionFullRules, transitionSummary: room.history.filter(h => !h.practice && h.block === room.block), transitionPending: room.phase === 'reveal' && (room.practice ? room.settings.gamePlan !== 'manual' : plannedMode(room,room.realRound + 1) !== (room.settings.gamePlan === 'manual' ? (room.history.find(h => h.round === room.round)?.mode || room.settings.mode) : room.settings.mode)), rankChanges: room.rankChanges, topEarners: room.topEarners, finalReveal: room.finalReveal, practice: !!room.practice, practiceDone: room.practiceDone,
     started: room.started, phase: room.phase, step: room.step,
     remainingMs: room.phase === 'trade' ? Math.max(0, room.deadline - Date.now()) : 0,
     yourRole: role, yourCard: role === 'Buyer' ? { name: mine.card.name, values: mine.card.values, color: mine.card.color } : null,
-    sellerCurves, practiceCards, chatPhrases: role ? [...phrases[role === 'Seller' ? 'Kitchen' : 'Customer'], ...phrases.Shared] : [],
+    sellerCurves, practiceCards, talkSignal: mine && (role === 'Buyer' || (role === 'Seller' && room.step !== 'talk')) ? room.signals[mine.a] || null : null, chatPhrases: role ? [...phrases[role === 'Seller' ? 'Kitchen' : 'Customer'], ...phrases.Shared] : [],
     yourPair: mine ? mine.a : null, history: visibleHistory, efficiency,
     offer: mine ? room.offers[mine.a] || null : null,
     messages: mine ? room.messages[mine.a] || [] : [], yourId: pid
@@ -235,6 +266,8 @@ const server = http.createServer((req, res) => {
     if (req.method === 'POST' && parts[0] === 'api' && parts[1] === 'join') {
       const room = rooms.get(String(data.code || '').toUpperCase());
       if (!room) return fail(res, 404, 'Room not found. Check the code and try again.');
+      if (Date.now() - room.lastActivity >= ROOM_IDLE_MS) { rooms.delete(room.code); return fail(res, 404, 'Room not found.'); }
+      room.lastActivity = Date.now();
       let player = room.players.find(p => p.id === data.id);
       if (!player && room.started && !room.settings.lateJoin) return fail(res, 403, 'This game has already started. Ask the host to open a new room.');
       if (!player) {
@@ -247,6 +280,8 @@ const server = http.createServer((req, res) => {
     if (parts[0] !== 'api' || !parts[1]) return fail(res, 404, 'Not found');
     const room = rooms.get(parts[1].toUpperCase());
     if (!room) return fail(res, 404, 'Room not found');
+    if (Date.now() - room.lastActivity >= ROOM_IDLE_MS) { rooms.delete(room.code); return fail(res, 404, 'Room not found'); }
+    room.lastActivity = Date.now();
     const pid = data.id || url.searchParams.get('id');
     if (req.method === 'GET' && parts[2] === 'state') {
       advanceTime(room);
@@ -264,15 +299,26 @@ const server = http.createServer((req, res) => {
       return json(res, 200, { ok: true });
     }
     if (parts[2] === 'settings' && req.method === 'POST' && pid === room.hostId && room.phase !== 'trade') {
-      const allowed = ['mode', 'gamePlan', 'cycles', 'chat', 'odd', 'lateJoin'];
-      for (const key of allowed) { if (!(key in (data.settings || {}))) continue; if (room.started && (key === 'gamePlan' || key === 'cycles' || (key === 'mode' && room.settings.gamePlan !== 'manual'))) continue; room.settings[key] = data.settings[key]; }
-      if (![1,2,3].includes(Number(room.settings.cycles))) room.settings.cycles = 2;
+      const allowed = ['mode', 'gamePlan', 'cycles', 'chat', 'customerSpeaksFirst', 'odd', 'lateJoin'];
+      for (const key of allowed) { if (!(key in (data.settings || {}))) continue; if (room.started && (key === 'gamePlan' || key === 'cycles' || key === 'customerSpeaksFirst' || (key === 'mode' && room.settings.gamePlan !== 'manual'))) continue; room.settings[key] = data.settings[key]; }
+      if (![2,4,6].includes(Number(room.settings.cycles))) room.settings.cycles = 4;
       if (!['rotate','menu-first','manual'].includes(room.settings.gamePlan)) room.settings.gamePlan = 'rotate';
     }
     if (parts[2] === 'start' && req.method === 'POST' && pid === room.hostId && room.phase === 'lobby') {
       const practice = !!data.practice;
-      if (!practice) { room.realRound = 0; room.block = 0; room.blockRound = 0; }
+      if (!practice) { room.realRound = 0; room.block = 0; room.blockRound = 0; room.seenModes = []; }
       if (startRound(room, practice) && practice) room.practiceDone = false;
+    }
+    if (parts[2] === 'talk' && req.method === 'POST' && room.phase === 'trade' && room.step === 'talk') {
+      const pair = room.pairs.find(p => (p.a === pid || p.b === pid) && (p.roleA === 'Buyer' ? p.a === pid : p.b === pid));
+      if (!pair) return fail(res, 403, 'Only the customer can send a signal.');
+      const buyerId = pair.roleA === 'Buyer' ? pair.a : pair.b;
+      if (pid !== buyerId) return fail(res, 403, 'Only the customer can send a signal.');
+      const choice = customerSignals.find(x => x.text === data.signal);
+      if (!choice) return fail(res, 400, 'Choose one of the customer signals.');
+      if (!room.signals[pair.a]) room.signals[pair.a] = { buyer: buyerId, text: choice.text, kind: choice.kind, bluff: ['small','medium','large'].includes(choice.kind) && choice.kind !== ['small','medium','large'][pair.cardType] };
+      const buyers = room.pairs.filter(p => (p.roleA === 'Buyer' ? p.a : p.b) !== 'bot');
+      if (buyers.every(p => room.signals[p.a])) closeTalk(room);
     }
     if (parts[2] === 'offer' && req.method === 'POST' && room.phase === 'trade' && room.step === 'offer') {
       const pair = room.pairs.find(p => (p.a === pid || p.b === pid) && (p.roleA === 'Seller' ? p.a === pid : p.b === pid));
@@ -292,7 +338,7 @@ const server = http.createServer((req, res) => {
       }
     }
     if (parts[2] === 'message' && req.method === 'POST') {
-      if (!room.settings.chat || room.phase !== 'trade') return fail(res, 403, 'Chat is not available now.');
+      if (!room.settings.chat || room.phase !== 'trade' || room.step === 'talk') return fail(res, 403, 'Chat is not available now.');
       const pair = room.pairs.find(p => p.a === pid || p.b === pid);
       if (!pair || pairDone(room, pair)) return fail(res, 403, 'You are not in an active chat.');
       const seller = pair.roleA === 'Seller' ? pair.a : pair.b;
@@ -303,22 +349,38 @@ const server = http.createServer((req, res) => {
       if (thread.length > 30) thread.shift();
     }
     if (parts[2] === 'next' && req.method === 'POST' && pid === room.hostId && room.phase === 'reveal') {
-      if (room.practice) { room.practiceDone = true; room.realRound = 0; room.block = 0; room.blockRound = 0; startRound(room, false); }
-      else if (room.settings.gamePlan === 'manual' || room.realRound < room.settings.cycles * 8) startRound(room, false);
+      if (room.practice) {
+        room.practiceDone = true; room.practice = false; room.realRound = 0; room.block = 0; room.blockRound = 0;
+        if (room.settings.gamePlan === 'manual') {
+          const nextMode = room.settings.mode, practiceMode = room.history.find(h => h.round === room.round)?.mode || nextMode;
+          if (nextMode !== practiceMode) enterTransition(room, nextMode); else startRound(room, false);
+        } else enterTransition(room, plannedMode(room, 1));
+      } else if (room.settings.gamePlan === 'manual' || room.realRound < room.settings.cycles * 4) {
+        const nextMode = plannedMode(room, room.realRound + 1);
+        const currentMode = room.practice ? room.settings.mode : (room.history.find(h => h.round === room.round)?.mode || room.settings.mode);
+        if (nextMode !== currentMode) enterTransition(room, nextMode);
+        else startRound(room, false);
+      }
     }
+    if (parts[2] === 'continue' && req.method === 'POST' && pid === room.hostId && room.phase === 'transition') startRound(room, false);
+    if ((parts[2] === 'play-again' || parts[2] === 'new-game') && req.method === 'POST' && pid === room.hostId && room.phase === 'ended') {
+      for (const p of room.players) { p.score = 0; p.lastRole = null; p.rotation = { buyer: 0, seller: 0, sitOut: 0 }; }
+      room.history = []; room.round = 0; room.realRound = 0; room.block = 0; room.blockRound = 0; room.seenModes = []; room.transitionMode = null; room.transitionFullRules = false; room.practiceDone = false; room.started = false; room.botLastRole = null; room.leaderboardScores = {}; room.rankChanges = {}; room.topEarners = []; room.roundFinalized = false; room.finalReveal = false;
+      room.practice = false; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {}; room.signals = {};
+    }
+    if (parts[2] === 'close' && req.method === 'POST' && pid === room.hostId) rooms.delete(room.code);
     if (parts[2] === 'reset' && req.method === 'POST' && pid === room.hostId && room.phase !== 'trade') {
       for (const p of room.players) { p.score = 0; p.lastRole = null; p.rotation = { buyer: 0, seller: 0, sitOut: 0 }; }
-      room.history = []; room.round = 0; room.realRound = 0; room.block = 0; room.blockRound = 0; room.blockBannerUntil = 0; room.practiceDone = false; room.started = false; room.botLastRole = null; room.leaderboardScores = {}; room.rankChanges = {}; room.topEarners = []; room.roundFinalized = false; room.finalReveal = false;
-      room.practice = false; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {};
+      room.history = []; room.round = 0; room.realRound = 0; room.block = 0; room.blockRound = 0; room.seenModes = []; room.transitionMode = null; room.transitionFullRules = false; room.practiceDone = false; room.started = false; room.botLastRole = null; room.leaderboardScores = {}; room.rankChanges = {}; room.topEarners = []; room.roundFinalized = false; room.finalReveal = false;
+      room.practice = false; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {}; room.signals = {}; room.finalReveal = false;
     }
     if (parts[2] === 'end' && req.method === 'POST' && pid === room.hostId) {
       if (room.phase === 'trade') for (const pair of room.pairs) if (!pairDone(room, pair)) settle(room, pair, 0, { veto: true, reason: 'game_ended' });
-      room.phase = 'ended'; room.endAt = Date.now() + 30000;
-      const endingCode = room.code;
-      setTimeout(() => rooms.delete(endingCode), 30000).unref?.();
+      room.phase = 'ended'; room.finalReveal = true;
     }
     return json(res, 200, pub(room, pid));
   });
 });
+setInterval(() => { const cutoff = Date.now() - ROOM_IDLE_MS; for (const [roomCode, room] of rooms) if (room.lastActivity < cutoff) rooms.delete(roomCode); }, 60000).unref?.();
 server.listen(PORT, '0.0.0.0', () => console.log(`Hidden Appetite is running on http://localhost:${PORT}`));
 
