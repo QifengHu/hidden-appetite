@@ -39,9 +39,9 @@ function freshRoom(hostId, hostName) {
   return {
     code: code(), hostId,
     players: [{ id: hostId, name: hostName, score: 0, connected: true, lastSeen: Date.now(), lastRole: null, rotation: { buyer: 0, seller: 0, sitOut: 0 } }],
-    settings: { mode: 'menu', gamePlan: 'rotate', cycles: 4, chat: true, customerSpeaksFirst: true, odd: 'sit', lateJoin: true },
+    settings: { mode: 'menu', gamePlan: 'rotate', cycles: 4, chat: true, customerSpeaksFirst: true, odd: 'bot', lateJoin: true },
     round: 0, realRound: 0, block: 0, blockRound: 0, roundSitter: null, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0, transitionMode: null, transitionFullRules: false, seenModes: [], botLastRole: null, leaderboardScores: {}, rankChanges: {}, topEarners: [], roundFinalized: false, finalReveal: false, signals: {}, lastActivity: Date.now(),
-    pairs: [], history: [], offers: {}, messages: {}
+    pairs: [], history: [], offers: {}, messages: {}, ready: {}
   };
 }
 function pairDone(room, pair) { return room.history.some(h => h.round === room.round && h.a === pair.a); }
@@ -103,10 +103,10 @@ function settle(room, pair, quantity, { veto = false, reason = null } = {}) {
     table: Math.max(0, bestValue - actualValue), practice: !!room.practice, reason, signal: signal?.text || null, signalKind: signal?.kind || null, bluff: !!signal?.bluff
   });
   if (room.pairs.length && room.pairs.every(p => pairDone(room, p))) {
-    room.phase = 'reveal';
+    room.ready = {}; room.phase = 'reveal';
     freezeLeaderboard(room);
     if (!room.practice && room.settings.gamePlan !== 'manual' && room.realRound >= room.settings.cycles * 4) {
-      room.phase = 'ended'; room.finalReveal = true;
+      room.ready = {}; room.phase = 'ended'; room.finalReveal = true;
     }
   }
 }
@@ -127,7 +127,7 @@ function makeOffer(room, pair, playerId, quantity) {
   settle(room, pair, bestQ, { veto, reason: veto ? 'bot_veto' : null });
 }
 function enterTransition(room, mode) {
-  room.phase = 'transition'; room.step = null; room.transitionMode = mode;
+  room.ready = {}; room.phase = 'transition'; room.step = null; room.transitionMode = mode;
   room.transitionFullRules = !room.seenModes.includes(mode);
   if (room.transitionFullRules) room.seenModes.push(mode);
   room.deadline = Date.now() + 15000;
@@ -185,7 +185,7 @@ function startRound(room, practice = false) {
     const card = cards[crypto.randomInt(cards.length)];
     return { a: seller.id, b: buyer.id, roleA: 'Seller', roleB: 'Buyer', card, cardType: cards.indexOf(card) };
   });
-  room.phase = 'trade'; room.step = room.settings.customerSpeaksFirst ? 'talk' : 'offer'; room.deadline = Date.now() + (room.step === 'talk' ? (room.practice ? 60000 : 15000) : (room.practice ? 90000 : 30000)); room.roundFinalized = false;
+  room.ready = {}; room.phase = 'trade'; room.step = room.settings.customerSpeaksFirst ? 'talk' : 'offer'; room.deadline = Date.now() + (room.step === 'talk' ? (room.practice ? 60000 : 15000) : (room.practice ? 90000 : 30000)); room.roundFinalized = false;
   room.offers = {}; room.messages = {}; room.signals = {};
   room.started = true;
   for (const pair of room.pairs) {
@@ -203,7 +203,31 @@ function closeTalk(room) {
   room.step = 'offer'; room.deadline = Date.now() + (room.practice ? 90000 : 30000);
   for (const pair of room.pairs) if (pair.a === 'bot' && !pairDone(room,pair)) makeOffer(room,pair,'bot',4);
 }
+function advanceFromReveal(room) {
+  if (room.practice) {
+    room.practiceDone = true; room.practice = false; room.realRound = 0; room.block = 0; room.blockRound = 0;
+    if (room.settings.gamePlan === 'manual') {
+      const nextMode = room.settings.mode, practiceMode = room.history.find(h => h.round === room.round)?.mode || nextMode;
+      if (nextMode !== practiceMode) enterTransition(room, nextMode); else startRound(room, false);
+    } else enterTransition(room, plannedMode(room, 1));
+  } else if (room.settings.gamePlan === 'manual' || room.realRound < room.settings.cycles * 4) {
+    const nextMode = plannedMode(room, room.realRound + 1);
+    const currentMode = room.practice ? room.settings.mode : (room.history.find(h => h.round === room.round)?.mode || room.settings.mode);
+    if (nextMode !== currentMode) enterTransition(room, nextMode);
+    else startRound(room, false);
+  }
+}
+function allConnectedHumansReady(room) {
+  const players = room.players.filter(p => p.id !== 'bot' && p.connected);
+  return players.length > 0 && players.every(p => room.ready?.[p.id]);
+}
+function advanceIfReady(room) {
+  if (!allConnectedHumansReady(room)) return;
+  if (room.phase === 'reveal') advanceFromReveal(room);
+  else if (room.phase === 'transition') startRound(room, false);
+}
 function advanceTime(room) {
+  if (room.phase === 'reveal' || room.phase === 'transition') advanceIfReady(room);
   if (room.phase === 'transition' && Date.now() >= room.deadline) { startRound(room, false); return; }
   if (room.phase !== 'trade') return;
   if (room.step === 'talk') {
@@ -234,9 +258,10 @@ function pub(room, pid) {
   const maxAbsEarnings = Math.max(...cards.flatMap(card => card.values.map((value, q) => Math.abs(value - PRICE * q))));
   const sellerCurves = role === 'Seller' && !room.practice ? cards.map(card => ({ name: card.name.replace(' appetite', ''), shape: card.values.slice(1).map((value, index) => { const q = index + 1; const earnings = value - PRICE * q; const rounded = Number((earnings / maxAbsEarnings).toFixed(1)); return rounded === 0 && earnings < 0 ? -0.1 : rounded; }) })) : null;
   const practiceCards = role === 'Seller' && room.practice ? cards.map(card => ({ name: card.name, values: card.values, color: card.color })) : null;
+  const readyPlayers = room.players.filter(p => p.id !== 'bot' && p.connected);
   return {
-    code: room.code, hostId: room.hostId, awayThisRound: room.awayThisRound || 0,
-    players: room.players.map(p => ({ id: p.id, name: p.name, score: room.leaderboardScores[p.id] || 0, connected: p.connected, role: room.phase === 'trade' ? null : room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
+    code: room.code, hostId: room.hostId, awayThisRound: room.awayThisRound || 0, readiness: { ready: readyPlayers.filter(p => room.ready?.[p.id]).length, total: readyPlayers.length },
+    players: room.players.map(p => ({ id: p.id, name: p.name, score: room.leaderboardScores[p.id] || 0, connected: p.connected, ready: !!room.ready?.[p.id], role: room.phase === 'trade' ? null : room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
     settings: room.settings, round: room.round, realRound: room.realRound, totalRounds: room.settings.cycles * 4, block: room.block, blockRound: room.blockRound, totalBlocks: room.settings.cycles * 2, plannedMode: plannedMode(room), transitionMode: room.transitionMode, transitionFullRules: room.transitionFullRules, transitionSummary: room.history.filter(h => !h.practice && h.block === room.block), transitionPending: room.phase === 'reveal' && (room.practice ? room.settings.gamePlan !== 'manual' : plannedMode(room,room.realRound + 1) !== (room.settings.gamePlan === 'manual' ? (room.history.find(h => h.round === room.round)?.mode || room.settings.mode) : room.settings.mode)), rankChanges: room.rankChanges, topEarners: room.topEarners, finalReveal: room.finalReveal, practice: !!room.practice, practiceDone: room.practiceDone,
     started: room.started, phase: room.phase, step: room.step,
     remainingMs: room.phase === 'trade' ? Math.max(0, room.deadline - Date.now()) : 0,
@@ -346,46 +371,26 @@ const server = http.createServer((req, res) => {
         settle(room, pair, quantity, { veto });
       }
     }
-    if (parts[2] === 'message' && req.method === 'POST') {
-      if (!room.settings.chat || room.phase !== 'trade' || room.step === 'talk') return fail(res, 403, 'Chat is not available now.');
-      const pair = room.pairs.find(p => p.a === pid || p.b === pid);
-      if (!pair || pairDone(room, pair)) return fail(res, 403, 'You are not in an active chat.');
-      const seller = pair.roleA === 'Seller' ? pair.a : pair.b;
-      const rolePhrases = pid === seller ? phrases.Kitchen : phrases.Customer;
-      if (![...rolePhrases, ...phrases.Shared].includes(data.text)) return fail(res, 400, 'That phrase is not available for your role.');
-      const thread = room.messages[pair.a] || (room.messages[pair.a] = []);
-      thread.push({ id: pid, text: data.text });
-      if (thread.length > 30) thread.shift();
+    if (parts[2] === 'ready' && req.method === 'POST' && (room.phase === 'reveal' || room.phase === 'transition')) {
+      room.ready[pid] = true;
+      advanceIfReady(room);
     }
-    if (parts[2] === 'next' && req.method === 'POST' && pid === room.hostId && room.phase === 'reveal') {
-      if (room.practice) {
-        room.practiceDone = true; room.practice = false; room.realRound = 0; room.block = 0; room.blockRound = 0;
-        if (room.settings.gamePlan === 'manual') {
-          const nextMode = room.settings.mode, practiceMode = room.history.find(h => h.round === room.round)?.mode || nextMode;
-          if (nextMode !== practiceMode) enterTransition(room, nextMode); else startRound(room, false);
-        } else enterTransition(room, plannedMode(room, 1));
-      } else if (room.settings.gamePlan === 'manual' || room.realRound < room.settings.cycles * 4) {
-        const nextMode = plannedMode(room, room.realRound + 1);
-        const currentMode = room.practice ? room.settings.mode : (room.history.find(h => h.round === room.round)?.mode || room.settings.mode);
-        if (nextMode !== currentMode) enterTransition(room, nextMode);
-        else startRound(room, false);
-      }
-    }
+    if (parts[2] === 'next' && req.method === 'POST' && pid === room.hostId && room.phase === 'reveal') advanceFromReveal(room);
     if (parts[2] === 'continue' && req.method === 'POST' && pid === room.hostId && room.phase === 'transition') startRound(room, false);
     if ((parts[2] === 'play-again' || parts[2] === 'new-game') && req.method === 'POST' && pid === room.hostId && room.phase === 'ended') {
       for (const p of room.players) { p.score = 0; p.lastRole = null; p.rotation = { buyer: 0, seller: 0, sitOut: 0 }; }
       room.history = []; room.round = 0; room.realRound = 0; room.block = 0; room.blockRound = 0; room.seenModes = []; room.transitionMode = null; room.transitionFullRules = false; room.practiceDone = false; room.started = false; room.botLastRole = null; room.leaderboardScores = {}; room.rankChanges = {}; room.topEarners = []; room.roundFinalized = false; room.finalReveal = false;
-      room.practice = false; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {}; room.signals = {};
+      room.practice = false; room.ready = {}; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {}; room.signals = {};
     }
     if (parts[2] === 'close' && req.method === 'POST' && pid === room.hostId) rooms.delete(room.code);
     if (parts[2] === 'reset' && req.method === 'POST' && pid === room.hostId && room.phase !== 'trade') {
       for (const p of room.players) { p.score = 0; p.lastRole = null; p.rotation = { buyer: 0, seller: 0, sitOut: 0 }; }
       room.history = []; room.round = 0; room.realRound = 0; room.block = 0; room.blockRound = 0; room.seenModes = []; room.transitionMode = null; room.transitionFullRules = false; room.practiceDone = false; room.started = false; room.botLastRole = null; room.leaderboardScores = {}; room.rankChanges = {}; room.topEarners = []; room.roundFinalized = false; room.finalReveal = false;
-      room.practice = false; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {}; room.signals = {}; room.finalReveal = false;
+      room.practice = false; room.ready = {}; room.phase = 'lobby'; room.roundSitter = null; room.step = null; room.pairs = []; room.offers = {}; room.messages = {}; room.signals = {}; room.finalReveal = false;
     }
     if (parts[2] === 'end' && req.method === 'POST' && pid === room.hostId) {
       if (room.phase === 'trade') for (const pair of room.pairs) if (!pairDone(room, pair)) settle(room, pair, 0, { veto: true, reason: 'game_ended' });
-      room.phase = 'ended'; room.finalReveal = true;
+      room.ready = {}; room.phase = 'ended'; room.finalReveal = true;
     }
     return json(res, 200, pub(room, pid));
   });
