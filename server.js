@@ -39,7 +39,7 @@ function freshRoom(hostId, hostName) {
   return {
     code: code(), hostId,
     players: [{ id: hostId, name: hostName, score: 0, connected: true, lastSeen: Date.now(), lastRole: null, rotation: { buyer: 0, seller: 0, sitOut: 0 } }],
-    settings: { mode: 'menu', gamePlan: 'rotate', cycles: 4, chat: true, customerSpeaksFirst: true, odd: 'sit', lateJoin: false },
+    settings: { mode: 'menu', gamePlan: 'rotate', cycles: 4, chat: true, customerSpeaksFirst: true, odd: 'sit', lateJoin: true },
     round: 0, realRound: 0, block: 0, blockRound: 0, roundSitter: null, practiceDone: false, started: false, phase: 'lobby', step: null, deadline: 0, transitionMode: null, transitionFullRules: false, seenModes: [], botLastRole: null, leaderboardScores: {}, rankChanges: {}, topEarners: [], roundFinalized: false, finalReveal: false, signals: {}, lastActivity: Date.now(),
     pairs: [], history: [], offers: {}, messages: {}
   };
@@ -135,6 +135,7 @@ function enterTransition(room, mode) {
 function startRound(room, practice = false) {
   room.roundSitter = null;
   room.practice = practice;
+  room.awayThisRound = room.players.filter(p => !p.connected).length;
   let active = shuffle(room.players.filter(p => p.connected));
   if (active.length === 1) {
     active.push({ id: 'bot', name: 'Miso 🤖', score: 0, connected: true, lastRole: room.botLastRole, rotation: { buyer: 0, seller: 0, sitOut: 0 } });
@@ -184,7 +185,7 @@ function startRound(room, practice = false) {
     const card = cards[crypto.randomInt(cards.length)];
     return { a: seller.id, b: buyer.id, roleA: 'Seller', roleB: 'Buyer', card, cardType: cards.indexOf(card) };
   });
-  room.phase = 'trade'; room.step = room.settings.customerSpeaksFirst ? 'talk' : 'offer'; room.deadline = Date.now() + (room.step === 'talk' ? 15000 : 30000); room.roundFinalized = false;
+  room.phase = 'trade'; room.step = room.settings.customerSpeaksFirst ? 'talk' : 'offer'; room.deadline = Date.now() + (room.step === 'talk' ? (room.practice ? 60000 : 15000) : (room.practice ? 90000 : 30000)); room.roundFinalized = false;
   room.offers = {}; room.messages = {}; room.signals = {};
   room.started = true;
   for (const pair of room.pairs) {
@@ -199,7 +200,7 @@ function startRound(room, practice = false) {
   return true;
 }
 function closeTalk(room) {
-  room.step = 'offer'; room.deadline = Date.now() + 30000;
+  room.step = 'offer'; room.deadline = Date.now() + (room.practice ? 90000 : 30000);
   for (const pair of room.pairs) if (pair.a === 'bot' && !pairDone(room,pair)) makeOffer(room,pair,'bot',4);
 }
 function advanceTime(room) {
@@ -219,7 +220,7 @@ function advanceTime(room) {
   if (room.step === 'offer') {
     for (const pair of room.pairs) if (!pairDone(room, pair) && !room.offers[pair.a]) settle(room, pair, 0, { veto: true, reason: 'seller_timeout' });
     if (room.phase !== 'trade') return;
-    room.step = 'respond'; room.deadline = Date.now() + 20000;
+    room.step = 'respond'; room.deadline = Date.now() + (room.practice ? 60000 : 20000);
   } else if (room.step === 'respond') {
     for (const pair of room.pairs) if (!pairDone(room, pair)) settle(room, pair, 0, { veto: true, reason: 'buyer_timeout' });
   }
@@ -234,7 +235,7 @@ function pub(room, pid) {
   const sellerCurves = role === 'Seller' && !room.practice ? cards.map(card => ({ name: card.name.replace(' appetite', ''), shape: card.values.slice(1).map((value, index) => { const q = index + 1; const earnings = value - PRICE * q; const rounded = Number((earnings / maxAbsEarnings).toFixed(1)); return rounded === 0 && earnings < 0 ? -0.1 : rounded; }) })) : null;
   const practiceCards = role === 'Seller' && room.practice ? cards.map(card => ({ name: card.name, values: card.values, color: card.color })) : null;
   return {
-    code: room.code, hostId: room.hostId,
+    code: room.code, hostId: room.hostId, awayThisRound: room.awayThisRound || 0,
     players: room.players.map(p => ({ id: p.id, name: p.name, score: room.leaderboardScores[p.id] || 0, connected: p.connected, role: room.phase === 'trade' ? null : room.pairs.find(x => x.a === p.id || x.b === p.id)?.[room.pairs.find(x => x.a === p.id || x.b === p.id).a === p.id ? 'roleA' : 'roleB'] || null, rotation: p.rotation, sittingOut: p.id === room.roundSitter })),
     settings: room.settings, round: room.round, realRound: room.realRound, totalRounds: room.settings.cycles * 4, block: room.block, blockRound: room.blockRound, totalBlocks: room.settings.cycles * 2, plannedMode: plannedMode(room), transitionMode: room.transitionMode, transitionFullRules: room.transitionFullRules, transitionSummary: room.history.filter(h => !h.practice && h.block === room.block), transitionPending: room.phase === 'reveal' && (room.practice ? room.settings.gamePlan !== 'manual' : plannedMode(room,room.realRound + 1) !== (room.settings.gamePlan === 'manual' ? (room.history.find(h => h.round === room.round)?.mode || room.settings.mode) : room.settings.mode)), rankChanges: room.rankChanges, topEarners: room.topEarners, finalReveal: room.finalReveal, practice: !!room.practice, practiceDone: room.practiceDone,
     started: room.started, phase: room.phase, step: room.step,
@@ -273,13 +274,15 @@ const server = http.createServer((req, res) => {
       if (Date.now() - room.lastActivity >= ROOM_IDLE_MS) { rooms.delete(room.code); return fail(res, 404, 'Room not found.'); }
       room.lastActivity = Date.now();
       let player = room.players.find(p => p.id === data.id);
+      let lateJoinWelcome = false;
       if (!player && room.started && !room.settings.lateJoin) return fail(res, 403, 'This game has already started. Ask the host to open a new room.');
       if (!player) {
+        lateJoinWelcome = !!room.started;
         player = { id: id(), name: String(data.name || 'Player').trim().slice(0, 18) || 'Player', score: 0, connected: true, lastSeen: Date.now(), lastRole: null, rotation: { buyer: 0, seller: 0, sitOut: 0 } };
         room.players.push(player);
       }
       player.connected = true; player.lastSeen = Date.now();
-      return json(res, 200, { code: room.code, id: player.id });
+      return json(res, 200, { code: room.code, id: player.id, lateJoinWelcome });
     }
     if (parts[0] !== 'api' || !parts[1]) return fail(res, 404, 'Not found');
     const room = rooms.get(parts[1].toUpperCase());
@@ -288,12 +291,14 @@ const server = http.createServer((req, res) => {
     room.lastActivity = Date.now();
     const pid = data.id || url.searchParams.get('id');
     if (req.method === 'GET' && parts[2] === 'state') {
-      advanceTime(room);
       if (!rooms.has(room.code)) return fail(res, 404, 'Room not found');
       const player = room.players.find(p => p.id === pid);
+      const returnedFromAway = !!player && (!player.connected || Date.now() - player.lastSeen > 60000);
       if (player) { player.lastSeen = Date.now(); player.connected = true; }
-      for (const p of room.players) if (Date.now() - p.lastSeen > 10000) p.connected = false;
-      return json(res, 200, pub(room, pid));
+      for (const p of room.players) if (Date.now() - p.lastSeen > 60000) p.connected = false;
+      advanceTime(room);
+      if (!rooms.has(room.code)) return fail(res, 404, 'Room not found');
+      return json(res, 200, { ...pub(room, pid), returnedFromAway });
     }
     const player = room.players.find(p => p.id === pid);
     if (!player) return fail(res, 403, 'Join the room first.');
